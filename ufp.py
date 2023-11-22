@@ -1,9 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
-
 import time
 import numpy as np
 import random as rd
@@ -21,20 +15,6 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint,Ear
 from torchmetrics import MeanSquaredError
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import matplotlib.pyplot as plt
-
-
-# In[ ]:
-
-
-
-
-
-# In[2]:
-
-
-
-# In[ ]:
-
 
 def problem_grouping(clients, time_slot, quad_constr, util_rate=1.5,
                      time_len=6, num_of_util_groups=15):  ##grouping by utility,then by time_slot_length
@@ -96,9 +76,6 @@ def problem_grouping(clients, time_slot, quad_constr, util_rate=1.5,
     return final_groups, total_demand, min_av_max_caps, av_cap_bytime, quad_constr, min_util, av_util
 
 
-# In[ ]:
-
-
 def data_preprocess(groups, total_demand, quad_cap, min_av_max_caps, av_cap_bytime,
                     min_util, av_util, num_of_dims=3, num_of_clients=1500, time_length=96):
     length = len(groups)
@@ -132,10 +109,6 @@ def data_preprocess(groups, total_demand, quad_cap, min_av_max_caps, av_cap_byti
     labels[-1][1] = 1 - labels[:, 1].sum()
     return inputs,labels
 
-
-# In[ ]:
-
-
 class DataSetMaker(Dataset):
     def __init__(self):
         self.states=list(glob.glob('states/*.npz'))
@@ -153,10 +126,6 @@ class DataSetMaker(Dataset):
         inputs, labels = data_preprocess(f_groups, tot_dem, q_c, min_av_max_caps, av_cap_bytime,
                                min_util, av_util)
         return np.float32(inputs), np.float32(labels)
-
-
-# In[29]:
-
 
 dataset=DataSetMaker()
 
@@ -443,13 +412,7 @@ class  KnapsackPredictor(TransformerPredictor):
         print("Predictions:", predictions[[-1]].to('cpu').detach().numpy())
 
 
-# In[44]:
-
-
-CHECKPOINT_PATH="C:\\Users\\zhira\\CSIE_PYTHON_PROJECTS\\UFP_FINAL"
-
-
-# In[45]:
+CHECKPOINT_PATH="/home/khazhak/TDMDKP/ckpts"
 
 
 def train_knapsack(**kwargs):
@@ -486,11 +449,9 @@ def train_knapsack(**kwargs):
     return model
 
 
-# In[46]:
-
-
 knapsack_model = train_knapsack(input_dim=108,model_dim=150,num_heads=2,num_classes=2,
                                 num_layers=2,dropout=0.0,lr=1e-4, warmup=20)
+
 """
 
 # In[47]:

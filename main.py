@@ -8,15 +8,15 @@ from constructor import construct
 
 
 def problem_solver(filename):
-    data = np.load(f'problem_states_new//{filename}.npz')
+    data = np.load(f'problem_states_new/{filename}.npz')
     clients = data['cl']
     time_slot_capacity = data['tslot']
     B_constraint = data['quad_constr']
     data.close()
-    ufp_model = gp.read(f"problem_states_new//model_{filename}.lp")
+    ufp_model = gp.read(f"problem_states_new/model_{filename}.lp")
     try:
-        os.remove(f"problem_states_new//model_{filename}.lp")
-        os.remove(f'problem_states_new//{filename}.npz')
+        os.remove(f"problem_states_new/model_{filename}.lp")
+        os.remove(f'problem_states_new/{filename}.npz')
     except Exception as e:
         print(f"Error deleting file {filename}: {e}")
     ufp_model.setParam('TimeLimit', 150)
@@ -38,8 +38,8 @@ def problem_solver(filename):
         return
     answer = np.array([item.x for item in ufp_model.getVars()])
     clients[:, -1] = answer
-    np.savez(f'states_new//{filename}', cl=clients, tslot=time_slot_capacity, quad_constr=B_constraint)
-    np.save(f'answers_new//{filename}', answer)
+    np.savez(f'states_new/{filename}', cl=clients, tslot=time_slot_capacity, quad_constr=B_constraint)
+    np.save(f'answers_new/{filename}', answer)
 
 
 if __name__ == '__main__':

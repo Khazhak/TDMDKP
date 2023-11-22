@@ -86,8 +86,8 @@ def problem_constructor(filename, num_of_clients, arrival_time='uniform', end_ti
 
     ufp_model.setObjective(gp.quicksum([opt_choice[i] * clients[i][-2] for i in range(num_of_clients)]),
                            GRB.MAXIMIZE)
-    np.savez(f'problem_states_new//{filename}', cl=clients, tslot=time_slot_capacity, quad_constr=B_constraint)
-    ufp_model.write(f"problem_states_new//model_{filename}.lp")
+    np.savez(f'problem_states_new/{filename}', cl=clients, tslot=time_slot_capacity, quad_constr=B_constraint)
+    ufp_model.write(f"problem_states_new/model_{filename}.lp")
     del clients
     del time_slot_capacity
     del constr_1

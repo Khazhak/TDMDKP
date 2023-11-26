@@ -502,25 +502,25 @@ def objective(trial: optuna.trial.Trial):
 
 
 if __name__ == '__main__':
-    knapsack_model = train_knapsack(input_dim=108, model_dim=156, num_heads=2, num_classes=2,
-                                    num_layers=2, dropout=0.0, lr=28e-4)
-    # study = optuna.create_study(direction='minimize')
-    # study.optimize(objective, n_trials=1+0)
-    #
-    # # Print the best hyperparameters
-    # best_trial = study.best_trial
-    # print(f"Best trial: {best_trial.params}")
-    #
-    # best_trial_dict = best_trial.params
-    # best_trial_dict["value"] = best_trial.value
-    #
-    # with open('best_trial.json', 'w') as outfile:
-    #     json.dump(best_trial_dict, outfile, indent=4)
+    # knapsack_model = train_knapsack(input_dim=108, model_dim=156, num_heads=2, num_classes=2,
+    #                                 num_layers=2, dropout=0.0, lr=28e-4)
+    study = optuna.create_study(direction='minimize')
+    study.optimize(objective, n_trials=100)
 
-    # with open('best_trial.json', 'r') as infile:
-    #     loaded_trial_data = json.load(infile)
-    #
-    # # Use the loaded data
-    # print(loaded_trial_data)
+    # Print the best hyperparameters
+    best_trial = study.best_trial
+    print(f"Best trial: {best_trial.params}")
+
+    best_trial_dict = best_trial.params
+    best_trial_dict["value"] = best_trial.value
+
+    with open('best_trial.json', 'w') as outfile:
+        json.dump(best_trial_dict, outfile, indent=4)
+
+    with open('best_trial.json', 'r') as infile:
+        loaded_trial_data = json.load(infile)
+
+    # Use the loaded data
+    print(loaded_trial_data)
 
 ##

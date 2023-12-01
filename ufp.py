@@ -6,81 +6,104 @@ import os
 import torch
 from pathlib import Path
 import glob
-from torch.utils.data import Dataset,DataLoader,random_split
+from torch.utils.data import Dataset, DataLoader, random_split
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint,EarlyStopping
+from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, EarlyStopping
 from torchmetrics import MeanSquaredError
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import matplotlib.pyplot as plt
 
-def problem_grouping(clients, time_slot, quad_constr, util_rate=1.5,
-                     time_len=6, num_of_util_groups=15):  ##grouping by utility,then by time_slot_length
+
+def problem_grouping(clients_array, time_slot, quad_constr, util_rate=1.5,
+                     time_len=16, num_of_util_groups=15,
+                     num_of_demand_groups=16,
+                     max_quadratic_demand=174,
+                     max_cap=105000,
+                     max_utility=400):  ##grouping by utility,then demand,then by time_slot_length
+    clients = clients_array.copy()
     num_of_dims = time_slot.shape[0]
-    time_slot_min = time_slot.min(axis=1)
-    time_slot_av = time_slot.mean(axis=1)
-    time_slot_max = time_slot.max(axis=1)
-    max_cap = time_slot.max()
-    min_av_max_caps = np.concatenate((time_slot_min, time_slot_av, time_slot_max))
-    # normalizing time capacities
-    min_av_max_caps /= max_cap
-    quad_constr /= max_cap
-    av_cap_bytime = time_slot.mean(axis=0) / max_cap
-    # Normalizing demands in each dimension by min capacity
-    for dim in range(num_of_dims):
-        clients[:, dim] /= time_slot_min[dim]
-    # sum of demands of the first dimension normalized by min capacity of the first dimension
-    total_demand = clients[:, 0].sum()
     ##Grouping by utilities
     max_util = clients[:, -2].max()
-    min_util = clients[:, -2].min()
-    av_util = clients[:, -2].mean()
     if 100 < max_util <= 1200:
         clients[:, -2] /= 10
     elif max_util > 1200:
         clients[:, -2] /= 300
     util_groups = []
-    steps = np.zeros(num_of_util_groups)
-    steps[0] = util_rate
-    for i in range(1, steps.size):
-        steps[i] = steps[i - 1] * util_rate
-    bool_idx = (clients[:, -2] <= steps[0])
+    time_steps = np.zeros(num_of_util_groups)
+    time_steps[0] = util_rate
+    for i in range(1, time_steps.size):
+        time_steps[i] = time_steps[i - 1] * util_rate
+    bool_idx = (clients[:, -2] <= time_steps[0])
     util_groups.append(clients[np.where(bool_idx)[0]])
     for i in range(1, num_of_util_groups):
-        bool_idx = (clients[:, -2] <= steps[i]) & (
-                clients[:, -2] > steps[i - 1])
+        bool_idx = (clients[:, -2] <= time_steps[i]) & (
+                clients[:, -2] > time_steps[i - 1])
         util_groups.append(clients[np.where(bool_idx)[0]])
-    # Normalizing by max_util
+    # Normalizing by max_utility
+    clients /= max_utility
+    max_util = clients[:, -2].max()
+    min_util = clients[:, -2].min()
+    total_utility = clients[:, -2].sum()
     for group in util_groups:
-        group[:, -2] /= max_util
+        if group.size > 0:
+            group[:, -2] /= max_utility
+    ##Grouping by demand of 4th - quadratic dimension
+    demand_groups = []
+    step = max_quadratic_demand / num_of_demand_groups
+    demand_steps = np.arange(0, max_quadratic_demand + 1, step)
+    for i in range(num_of_util_groups):
+        if util_groups[i].size > 0:
+            group_demands = [np.sqrt((client[:num_of_dims] ** 2).sum()) for client in util_groups[i]]
+            for j in range(num_of_demand_groups):
+                bool_idx = (group_demands > demand_steps[j]) & (group_demands <= demand_steps[j + 1])
+                demand_groups.append(util_groups[i][np.where(bool_idx)[0]])
+        else:
+            for _ in range(num_of_demand_groups):
+                demand_groups.append(util_groups[i])
 
+    # Normalizing demands in each dimension by min capacity
+    time_slot_min = time_slot.min(axis=1)
+    for group in demand_groups:
+        for dim in range(num_of_dims):
+            group[:, dim] /= time_slot_min[dim]
+    # sum of demands of the first dimension normalized by min capacity of the first dimension
+    total_demand = 0
+    for group in demand_groups:
+        total_demand += group[:, 0].sum()
+    # Normalizing capacities by max capacity
+    time_slot_normalized = time_slot / max_cap
+    time_slot_min = time_slot_normalized.min(axis=1)
+    time_slot_av = time_slot_normalized.mean(axis=1)
+    time_slot_max = time_slot_normalized.max(axis=1)
+    min_av_max_caps = np.concatenate((time_slot_min, time_slot_av, time_slot_max))
+    quad_constr_normalized = quad_constr / max_cap
+    av_cap_bytime = time_slot.mean(axis=0) / max_cap
     ##Grouping by time_length
     final_groups = []
-    gr_time = int(time_slot.shape[1] / time_len)
-    for i in range(num_of_util_groups):
-        if (util_groups[i].size > 0):
-            group_time_lengths = util_groups[i][:, num_of_dims + 1] - util_groups[i][:, num_of_dims]
-            min_time_len = np.min(group_time_lengths)
-            max_time_len = np.max(group_time_lengths)
-            steps = np.linspace(min_time_len, max_time_len, gr_time + 1)
-            for j in range(gr_time - 1):
-                bool_idx = (group_time_lengths >= steps[j]) & (group_time_lengths < steps[j + 1])
-                final_groups.append(util_groups[i][np.where(bool_idx)[0]])
-            bool_idx = (group_time_lengths >= steps[-2]) & (group_time_lengths <= steps[-1])
-            final_groups.append(util_groups[i][np.where(bool_idx)[0]])
+    time_horizon = time_slot.shape[1]
+    num_of_time_groups = int(time_horizon / time_len)
+    time_steps = np.arange(0, time_horizon + 1, time_len)
+    for i in range(num_of_demand_groups * num_of_util_groups):
+        if demand_groups[i].size > 0:
+            group_time_lengths = demand_groups[i][:, num_of_dims + 1] - demand_groups[i][:, num_of_dims]
+            for j in range(num_of_time_groups):
+                bool_idx = (group_time_lengths > time_steps[j]) & (group_time_lengths <= time_steps[j + 1])
+                final_groups.append(demand_groups[i][np.where(bool_idx)[0]])
         else:
-            for _ in range(gr_time):
-                final_groups.append(util_groups[i])
-    return final_groups, total_demand, min_av_max_caps, av_cap_bytime, quad_constr, min_util, av_util
+            for _ in range(num_of_time_groups):
+                final_groups.append(demand_groups[i])
+
+    return final_groups, total_demand, min_av_max_caps, av_cap_bytime, quad_constr_normalized, min_util, max_util, total_utility
 
 
 def data_preprocess(groups, total_demand, quad_cap, min_av_max_caps, av_cap_bytime,
-                    min_util, av_util, num_of_dims=3, num_of_clients=1500, time_length=96):
+                    min_util, max_util, total_utility, num_of_dims=3, num_of_clients=1500, time_length=96):
     length = len(groups)
     inputs = np.zeros((length + 1, 3 * num_of_dims + 1 + time_length + 2))
-    labels = np.zeros((length + 1, 2))
+    labels = np.zeros((length + 1, 3))
     for i, group in enumerate(groups):
         if group.size > 0:
             inputs[i][:num_of_dims] = np.min(group[:, :num_of_dims], axis=0)  # minimum demand per dimension
@@ -88,7 +111,7 @@ def data_preprocess(groups, total_demand, quad_cap, min_av_max_caps, av_cap_byti
                                                              axis=0)  # average demand per dimension
             inputs[i][2 * num_of_dims:3 * num_of_dims] = np.max(group[:, :num_of_dims],
                                                                 axis=0)  # maximum demand per dimension
-            quadr_demands = ((group[:, :num_of_dims] ** 2).sum(axis=1) / 30000).mean()
+            quadr_demands = ((group[:, :num_of_dims] ** 2).sum(axis=1)).mean()  # mean demand in the quadratic dimension
             inputs[i][3 * num_of_dims] = quadr_demands
             inputs[i][3 * num_of_dims + 1:3 * num_of_dims + time_length + 1] = np.sum(
                 group[:, num_of_dims + 2:num_of_dims + 2 + time_length],
@@ -98,20 +121,25 @@ def data_preprocess(groups, total_demand, quad_cap, min_av_max_caps, av_cap_byti
             inputs[i][-1] = group.shape[0] / num_of_clients  # what part of clients is in this group
             labels[i][0] = np.sum(group[:, -1]) / num_of_clients  # what part is selected in the final answer
             if group[np.where(group[:, -1] == 1)].size > 0:
-                labels[i][1] = group[np.where(group[:, -1] == 1)][:,
-                               0].sum() / total_demand  # total demand of selected clients/total demand of the first dimension
+                # total demand of selected clients/total demand of the first dimension
+                selected = group[np.where(group[:, -1] == 1)]
+                labels[i][1] = selected[:, 0].sum() / total_demand
+                labels[i][2] = selected[:, -2].sum() / total_utility
     inputs[-1][:3 * num_of_dims] = min_av_max_caps
     inputs[-1][3 * num_of_dims] = quad_cap
     inputs[-1][3 * num_of_dims + 1:3 * num_of_dims + time_length + 1] = av_cap_bytime
     inputs[-1][-2] = min_util
-    inputs[-1][-1] = av_util
+    inputs[-1][-1] = max_util
     labels[-1][0] = 1 - labels[:, 0].sum()
     labels[-1][1] = 1 - labels[:, 1].sum()
-    return inputs,labels
+    labels[-1][2] = 1 - labels[:, 2].sum()
+    return inputs, labels
+
 
 class DataSetMaker(Dataset):
     def __init__(self):
-        self.states=list(glob.glob('states/*.npz'))
+        self.states = list(glob.glob('states/*.npz'))
+
     def __len__(self):
         return len(self.states)
 
@@ -120,25 +148,26 @@ class DataSetMaker(Dataset):
         clients_list = state['cl']
         time_slot_capacity = state['tslot']
         quad_constr = state['quad_constr']
-        f_groups, tot_dem, min_av_max_caps, av_cap_bytime, min_util, av_util, q_c = problem_grouping(clients_list,
-                                                                                                 time_slot_capacity,
-                                                                                                 quad_constr)
-        inputs, labels = data_preprocess(f_groups, tot_dem, q_c, min_av_max_caps, av_cap_bytime,
-                               min_util, av_util)
-        return np.float32(inputs), np.float32(labels)
+        f_groups, tot_dem, min_av_max_caps, av_cap_bytime, q_c, min_util, max_util, tot_util = problem_grouping(
+            clients_list,
+            time_slot_capacity,
+            quad_constr)
+        inp, lab = data_preprocess(f_groups, tot_dem, q_c, min_av_max_caps, av_cap_bytime,
+                                   min_util, max_util, tot_util)
+        return np.float32(inp), np.float32(lab)
 
-dataset=DataSetMaker()
 
+dataset = DataSetMaker()
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 print("Device:", device)
 
-train_set,valid_set,test_set=random_split(dataset,[3000,406,400])
+train_set, valid_set, test_set = random_split(dataset, [8000, 739, 700])
 
-
-train_loader = DataLoader(train_set, batch_size=32,shuffle=True,drop_last=True)
+train_loader = DataLoader(train_set, batch_size=32, shuffle=True, drop_last=True)
 val_loader = DataLoader(valid_set, batch_size=1)
 test_loader = DataLoader(test_set, batch_size=1)
+
 
 def scaled_dot_product(q, k, v):
     d_k = q.size()[-1]
@@ -147,6 +176,7 @@ def scaled_dot_product(q, k, v):
     attention = F.softmax(attn_logits, dim=-1)
     values = torch.matmul(attention, v)
     return values
+
 
 class MultiheadAttention(nn.Module):
 
@@ -160,7 +190,7 @@ class MultiheadAttention(nn.Module):
 
         # Stack all weight matrices 1...h together for efficiency
         # Note that in many implementations you see "bias=False" which is optional
-        self.qkv_proj = nn.Linear(input_dim, 3*embed_dim)
+        self.qkv_proj = nn.Linear(input_dim, 3 * embed_dim)
         self.o_proj = nn.Linear(embed_dim, embed_dim)
 
         self._reset_parameters()
@@ -177,18 +207,18 @@ class MultiheadAttention(nn.Module):
         qkv = self.qkv_proj(x)
 
         # Separate Q, K, V from linear output
-        qkv = qkv.reshape(batch_size, seq_length, self.num_heads, 3*self.head_dim)
-        qkv = qkv.permute(0, 2, 1, 3) # [Batch, Head, SeqLen, Dims]
+        qkv = qkv.reshape(batch_size, seq_length, self.num_heads, 3 * self.head_dim)
+        qkv = qkv.permute(0, 2, 1, 3)  # [Batch, Head, SeqLen, Dims]
         q, k, v = qkv.chunk(3, dim=-1)
 
         # Determine value outputs
         values = scaled_dot_product(q, k, v)
-        values = values.permute(0, 2, 1, 3) # [Batch, SeqLen, Head, Dims]
+        values = values.permute(0, 2, 1, 3)  # [Batch, SeqLen, Head, Dims]
         values = values.reshape(batch_size, seq_length, self.embed_dim)
         o = self.o_proj(values)
 
-        
         return o
+
 
 class EncoderBlock(nn.Module):
 
@@ -231,6 +261,7 @@ class EncoderBlock(nn.Module):
 
         return x
 
+
 class TransformerEncoder(nn.Module):
 
     def __init__(self, num_layers, **block_args):
@@ -241,6 +272,7 @@ class TransformerEncoder(nn.Module):
         for l in self.layers:
             x = l(x)
         return x
+
 
 class PositionalEncoding(nn.Module):
 
@@ -269,6 +301,7 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:, :x.size(1)]
         return x
 
+
 class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
 
     def __init__(self, optimizer, warmup, max_iters):
@@ -286,9 +319,11 @@ class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
             lr_factor *= epoch * 1.0 / self.warmup
         return lr_factor
 
+
 class TransformerPredictor(pl.LightningModule):
 
-    def __init__(self, input_dim, model_dim, num_classes, num_heads, num_layers, lr, warmup, max_iters, dropout=0.0, input_dropout=0.0):
+    def __init__(self, input_dim, model_dim, num_classes, num_heads, num_layers, lr, warmup, max_iters, dropout=0.0,
+                 input_dropout=0.0):
         """
         Inputs:
             input_dim - Hidden dimensionality of the input
@@ -317,7 +352,7 @@ class TransformerPredictor(pl.LightningModule):
         # Transformer
         self.transformer = TransformerEncoder(num_layers=self.hparams.num_layers,
                                               input_dim=self.hparams.model_dim,
-                                              dim_feedforward=2*self.hparams.model_dim,
+                                              dim_feedforward=2 * self.hparams.model_dim,
                                               num_heads=self.hparams.num_heads,
                                               dropout=self.hparams.dropout)
         # Output classifier per sequence lement
@@ -330,7 +365,7 @@ class TransformerPredictor(pl.LightningModule):
             nn.ReLU(inplace=True)
         )
 
-    def forward(self, x,add_positional_encoding=False):
+    def forward(self, x, add_positional_encoding=False):
         """
         Inputs:
             x - Input features of shape [Batch, SeqLen, input_dim]
@@ -344,7 +379,7 @@ class TransformerPredictor(pl.LightningModule):
         x = self.transformer(x)
         x = self.output_net(x)
         x = F.softmax(x, dim=-2)
-        #x = F.softmax(x, dim=1)
+        # x = F.softmax(x, dim=1)
         return x
 
     def configure_optimizers(self):
@@ -353,11 +388,10 @@ class TransformerPredictor(pl.LightningModule):
         lr_scheduler = CosineWarmupScheduler(optimizer,
                                              warmup=self.hparams.warmup,
                                              max_iters=self.hparams.max_iters)
-        
+
         return [optimizer], [{'scheduler': lr_scheduler,
                               'interval': 'epoch'}]
 
-        
     def training_step(self, batch, batch_idx):
         raise NotImplementedError
 
@@ -366,33 +400,43 @@ class TransformerPredictor(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         raise NotImplementedError
-        
-    def on_train_epoch_end(self):
-        raise NotImplementedError
+
 
 
 # In[43]:
 
 
-class  KnapsackPredictor(TransformerPredictor):
+class KnapsackPredictor(TransformerPredictor):
 
     def _calculate_loss(self, batch, mode="train"):
         inp_data, labels = batch
-        # Perform prediction and calculate loss and accuracy
-        #scaling_factors=torch.tensor([10,1],device=device)
         preds = self.forward(inp_data)
-        loss1 = F.l1_loss(preds[:,:,0],labels[:,:,0])
-        loss2 = F.l1_loss(preds[:,:,1],labels[:,:,1])
-        loss=loss1+loss2
+        loss1 = F.l1_loss(preds[:, :, 0], labels[:, :, 0])
+        loss2 = F.l1_loss(preds[:, :, 1], labels[:, :, 1])
+        loss3 = F.l1_loss(preds[:, :, 2], labels[:, :, 2])
+        loss = loss1 + loss2 + loss3
+        acc1 = ((preds[:, :, 0] - labels[:, :, 0]) / preds[:, :, 0]).abs().max()
+        acc2 = ((preds[:, :, 1] - labels[:, :, 1]) / preds[:, :, 1]).abs().max()
+        acc3 = ((preds[:, :, 2] - labels[:, :, 2]) / preds[:, :, 2]).abs().max()
+        acc4 = ((preds[:, :, 1] - labels[:, :, 1]) / preds[:, :, 1]).abs().mean()
+        acc5 = ((preds[:, :, 0] - labels[:, :, 0]) / preds[:, :, 0]).abs().mean()
+        acc6 = ((preds[:, :, 2] - labels[:, :, 2]) / preds[:, :, 2]).abs().mean()
+
         # Logging
-        self.log(f"{mode}_loss",loss)
-        self.log(f"{mode}_loss1",loss1)
-        self.log(f"{mode}_loss2",loss2)
+        self.log(f"{mode}_loss", loss)
+        self.log(f"{mode}_loss1", loss1)
+        self.log(f"{mode}_loss2", loss2)
+        self.log(f"{mode}_loss3", loss2)
+        self.log(f"{mode}_max_accuracy1", acc1)
+        self.log(f"{mode}_max_accuracy2", acc2)
+        self.log(f"{mode}_max_accuracy2", acc3)
+        self.log(f"{mode}_mean_accuracy1", acc4)
+        self.log(f"{mode}_mean_accuracy2", acc5)
+        self.log(f"{mode}_mean_accuracy2", acc6)
         return loss
 
-
     def training_step(self, batch, batch_idx):
-        loss= self._calculate_loss(batch, mode="train")
+        loss = self._calculate_loss(batch, mode="train")
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -400,34 +444,27 @@ class  KnapsackPredictor(TransformerPredictor):
 
     def test_step(self, batch, batch_idx):
         _ = self._calculate_loss(batch, mode="test")
-        
-    def on_train_epoch_end(self):
-        batch = next(iter(train_loader))
-        x, _ = batch
-        x=x.to(device)
-        # Forward pass to get predictions
-        predictions = self.forward(x)
-        
-        # Print predictions
-        print("Predictions:", predictions[[-1]].to('cpu').detach().numpy())
 
 
-CHECKPOINT_PATH="/home/khazhak/TDMDKP/ckpts"
+
+CHECKPOINT_PATH = "/home/khazhak/TDMDKP/ckpts"
 
 
 def train_knapsack(**kwargs):
     # Create a PyTorch Lightning trainer with the generation callback
     root_dir = os.path.join(CHECKPOINT_PATH, "UfpCheckPoint")
     os.makedirs(root_dir, exist_ok=True)
-    trainer = pl.Trainer(callbacks=[ModelCheckpoint(dirpath=root_dir,filename='UfpCheckPoint',save_weights_only=True, mode="min", monitor="val_loss"),
-                                    LearningRateMonitor(logging_interval='epoch'),
-                                    EarlyStopping(monitor="val_loss", min_delta=1e-6, patience=20, verbose=False, mode="min")],
-                         accelerator="gpu" if str(device).startswith("cuda") else "cpu",
-                         devices=1,
-                         max_epochs=150,
-                         gradient_clip_val=1,
-                         log_every_n_steps=10)
-    trainer.logger._default_hp_metric = None # Optional logging argument that we don't need
+    trainer = pl.Trainer(callbacks=[
+        ModelCheckpoint(dirpath=root_dir, filename='UfpCheckPoint', save_weights_only=True, mode="min",
+                        monitor="val_loss"),
+        LearningRateMonitor(logging_interval='epoch'),
+        EarlyStopping(monitor="val_loss", min_delta=1e-6, patience=20, verbose=False, mode="min")],
+        accelerator="gpu" if str(device).startswith("cuda") else "cpu",
+        devices=1,
+        max_epochs=150,
+        gradient_clip_val=1,
+        log_every_n_steps=10)
+    trainer.logger._default_hp_metric = None  # Optional logging argument that we don't need
 
     # Check whether pretrained model exists. If yes, load it and skip training
     pretrained_filename = os.path.join(root_dir, "UfpCheckPoint.ckpt")
@@ -449,8 +486,8 @@ def train_knapsack(**kwargs):
     return model
 
 
-knapsack_model = train_knapsack(input_dim=108,model_dim=150,num_heads=2,num_classes=2,
-                                num_layers=2,dropout=0.0,lr=1e-4, warmup=20)
+knapsack_model = train_knapsack(input_dim=108, model_dim=150, num_heads=2, num_classes=2,
+                                num_layers=2, dropout=0.0, lr=1e-4, warmup=20)
 
 """
 
@@ -818,6 +855,3 @@ util
 
 # In[ ]:
 """
-
-
-

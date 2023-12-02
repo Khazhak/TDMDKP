@@ -1,10 +1,7 @@
-import time
 import numpy as np
-import random as rd
 import math
 import os
 import torch
-from pathlib import Path
 import glob
 from torch.utils.data import Dataset, DataLoader, random_split
 import torch.nn as nn
@@ -12,14 +9,11 @@ import torch.nn.functional as F
 import torch.optim as optim
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, EarlyStopping
-from torchmetrics import MeanSquaredError
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-import matplotlib.pyplot as plt
 
 
 def problem_grouping(clients_array, time_slot, quad_constr, util_rate=1.5,
-                     time_len=16, num_of_util_groups=15,
-                     num_of_demand_groups=16,
+                     time_len=32, num_of_util_groups=15,
+                     num_of_demand_groups=10,
                      max_quadratic_demand=174,
                      max_cap=105000,
                      max_utility=400):  ##grouping by utility,then demand,then by time_slot_length
@@ -27,10 +21,13 @@ def problem_grouping(clients_array, time_slot, quad_constr, util_rate=1.5,
     num_of_dims = time_slot.shape[0]
     ##Grouping by utilities
     max_util = clients[:, -2].max()
+    utility_type = 0.0
     if 100 < max_util <= 1200:
         clients[:, -2] /= 10
+        utility_type = 0.5
     elif max_util > 1200:
         clients[:, -2] /= 300
+        utility_type = 1.0
     util_groups = []
     time_steps = np.zeros(num_of_util_groups)
     time_steps[0] = util_rate
@@ -96,11 +93,12 @@ def problem_grouping(clients_array, time_slot, quad_constr, util_rate=1.5,
             for _ in range(num_of_time_groups):
                 final_groups.append(demand_groups[i])
 
-    return final_groups, total_demand, min_av_max_caps, av_cap_bytime, quad_constr_normalized, min_util, max_util, total_utility
+    return final_groups, total_demand, min_av_max_caps, av_cap_bytime, quad_constr_normalized, min_util, max_util, total_utility, utility_type
 
 
 def data_preprocess(groups, total_demand, quad_cap, min_av_max_caps, av_cap_bytime,
-                    min_util, max_util, total_utility, num_of_dims=3, num_of_clients=1500, time_length=96):
+                    min_util, max_util, total_utility, utility_type, num_of_dims=3, num_of_clients=1500,
+                    time_length=96):
     length = len(groups)
     inputs = np.zeros((length + 1, 3 * num_of_dims + 1 + time_length + 2))
     labels = np.zeros((length + 1, 3))
@@ -117,7 +115,8 @@ def data_preprocess(groups, total_demand, quad_cap, min_av_max_caps, av_cap_byti
                 group[:, num_of_dims + 2:num_of_dims + 2 + time_length],
                 axis=0) / num_of_clients  # average time_occupancy
 
-            inputs[i][-2] = np.mean(group[:, -2])  # average utility
+            inputs[i][-3] = np.min(group[:, -2])  # min utility
+            inputs[i][-2] = np.min(group[:, -2])  # max utility
             inputs[i][-1] = group.shape[0] / num_of_clients  # what part of clients is in this group
             labels[i][0] = np.sum(group[:, -1]) / num_of_clients  # what part is selected in the final answer
             if group[np.where(group[:, -1] == 1)].size > 0:
@@ -128,8 +127,9 @@ def data_preprocess(groups, total_demand, quad_cap, min_av_max_caps, av_cap_byti
     inputs[-1][:3 * num_of_dims] = min_av_max_caps
     inputs[-1][3 * num_of_dims] = quad_cap
     inputs[-1][3 * num_of_dims + 1:3 * num_of_dims + time_length + 1] = av_cap_bytime
-    inputs[-1][-2] = min_util
-    inputs[-1][-1] = max_util
+    inputs[-1][-3] = min_util
+    inputs[-1][-2] = max_util
+    inputs[-1][-1] = utility_type
     labels[-1][0] = 1 - labels[:, 0].sum()
     labels[-1][1] = 1 - labels[:, 1].sum()
     labels[-1][2] = 1 - labels[:, 2].sum()
@@ -148,12 +148,12 @@ class DataSetMaker(Dataset):
         clients_list = state['cl']
         time_slot_capacity = state['tslot']
         quad_constr = state['quad_constr']
-        f_groups, tot_dem, min_av_max_caps, av_cap_bytime, q_c, min_util, max_util, tot_util = problem_grouping(
+        f_groups, tot_dem, min_av_max_caps, av_cap_bytime, q_c, min_util, max_util, tot_util, util_type = problem_grouping(
             clients_list,
             time_slot_capacity,
             quad_constr)
         inp, lab = data_preprocess(f_groups, tot_dem, q_c, min_av_max_caps, av_cap_bytime,
-                                   min_util, max_util, tot_util)
+                                   min_util, max_util, tot_util, util_type)
         return np.float32(inp), np.float32(lab)
 
 
@@ -402,7 +402,6 @@ class TransformerPredictor(pl.LightningModule):
         raise NotImplementedError
 
 
-
 # In[43]:
 
 
@@ -418,8 +417,8 @@ class KnapsackPredictor(TransformerPredictor):
         acc1 = ((preds[:, :, 0] - labels[:, :, 0]) / preds[:, :, 0]).abs().max()
         acc2 = ((preds[:, :, 1] - labels[:, :, 1]) / preds[:, :, 1]).abs().max()
         acc3 = ((preds[:, :, 2] - labels[:, :, 2]) / preds[:, :, 2]).abs().max()
-        acc4 = ((preds[:, :, 1] - labels[:, :, 1]) / preds[:, :, 1]).abs().mean()
-        acc5 = ((preds[:, :, 0] - labels[:, :, 0]) / preds[:, :, 0]).abs().mean()
+        acc4 = ((preds[:, :, 0] - labels[:, :, 0]) / preds[:, :, 0]).abs().mean()
+        acc5 = ((preds[:, :, 1] - labels[:, :, 1]) / preds[:, :, 1]).abs().mean()
         acc6 = ((preds[:, :, 2] - labels[:, :, 2]) / preds[:, :, 2]).abs().mean()
 
         # Logging
@@ -444,7 +443,6 @@ class KnapsackPredictor(TransformerPredictor):
 
     def test_step(self, batch, batch_idx):
         _ = self._calculate_loss(batch, mode="test")
-
 
 
 CHECKPOINT_PATH = "/home/khazhak/TDMDKP/ckpts"
@@ -481,12 +479,13 @@ def train_knapsack(**kwargs):
     # Test best model on validation and test set
     val_result = trainer.test(model, val_loader, verbose=1)
     test_result = trainer.test(model, test_loader, verbose=1)
+    result = {"test_acc": test_result, "val_acc": val_result}
 
     model = model.to(device)
-    return model
+    return model, result
 
 
-knapsack_model = train_knapsack(input_dim=108, model_dim=150, num_heads=2, num_classes=2,
+knapsack_model = train_knapsack(input_dim=109, model_dim=150, num_heads=2, num_classes=2,
                                 num_layers=2, dropout=0.0, lr=1e-4, warmup=20)
 
 """

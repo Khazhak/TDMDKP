@@ -1,7 +1,8 @@
+import time
 import numpy as np
 import math
-import os
 import json
+import os
 import torch
 import glob
 from torch.utils.data import Dataset, DataLoader, random_split
@@ -10,8 +11,10 @@ import torch.nn.functional as F
 import torch.optim as optim
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, EarlyStopping, Callback
+from pytorch_lightning.loggers import TensorBoardLogger
 import optuna
 from optuna.integration import PyTorchLightningPruningCallback
+import matplotlib.pyplot as plt
 
 """
 random
@@ -32,36 +35,38 @@ max demand in the 4-th dimension can be sqrt(10000+10000+10000)=100*sqrt(3)<=174
 
 Total demand per dimension can be max 96*100=9600,so 0.7 part of it is 6720 = max capacity
 
-max_utility=1200
+max_utility=400
 
-overall (1->1200)
+overall (1->400)
 """
 
 
 def problem_grouping(clients_array, time_slot, quad_constr, util_rate=1.5,
-                     time_len=32, num_of_util_groups=15,
-                     num_of_demand_groups=10,
+                     time_len=16, num_of_util_groups=15,
+                     num_of_demand_groups=16,
                      max_quadratic_demand=174,
-                     max_cap=105000,
-                     max_utility=400):  ##grouping by utility,then demand,then by time_slot_length
+                     max_utility=400):
+    """
+    Group by utility,then demand,then by time_slot_length,and normalize
+    """
     clients = clients_array.copy()
     num_of_dims = time_slot.shape[0]
-    ##Grouping by utilities
+    # Group by utilities
     max_util = clients[:, -2].max()
     if 100 < max_util <= 1200:
         clients[:, -2] /= 10
     elif max_util > 1200:
         clients[:, -2] /= 300
     util_groups = []
-    time_steps = np.zeros(num_of_util_groups)
-    time_steps[0] = util_rate
-    for i in range(1, time_steps.size):
-        time_steps[i] = time_steps[i - 1] * util_rate
-    bool_idx = (clients[:, -2] <= time_steps[0])
+    steps = np.zeros(num_of_util_groups)
+    steps[0] = util_rate
+    for i in range(1, steps.size):
+        steps[i] = steps[i - 1] * util_rate
+    bool_idx = (clients[:, -2] <= steps[0])
     util_groups.append(clients[np.where(bool_idx)[0]])
     for i in range(1, num_of_util_groups):
-        bool_idx = (clients[:, -2] <= time_steps[i]) & (
-                clients[:, -2] > time_steps[i - 1])
+        bool_idx = (clients[:, -2] <= steps[i]) & (
+                clients[:, -2] > steps[i - 1])
         util_groups.append(clients[np.where(bool_idx)[0]])
     # Normalizing by max_utility
     clients /= max_utility
@@ -71,7 +76,7 @@ def problem_grouping(clients_array, time_slot, quad_constr, util_rate=1.5,
     for group in util_groups:
         if group.size > 0:
             group[:, -2] /= max_utility
-    ##Grouping by demand of 4th - quadratic dimension
+    # Group by demand of 4th - quadratic dimension
     demand_groups = []
     step = max_quadratic_demand / num_of_demand_groups
     demand_steps = np.arange(0, max_quadratic_demand + 1, step)
@@ -85,12 +90,11 @@ def problem_grouping(clients_array, time_slot, quad_constr, util_rate=1.5,
             for _ in range(num_of_demand_groups):
                 demand_groups.append(util_groups[i])
 
-    # Normalizing demands in each dimension by min capacity
-    time_slot_min = time_slot.min(axis=1)
+    # Normalizing demands in each dimension by max capacity
+    max_cap = time_slot.max()
     for group in demand_groups:
-        for dim in range(num_of_dims):
-            group[:, dim] /= time_slot_min[dim]
-    # sum of demands of the first dimension normalized by min capacity of the first dimension
+        group[:, num_of_dims] /= max_cap
+    # sum of demands of the first dimension normalized by max capacity
     total_demand = 0
     for group in demand_groups:
         total_demand += group[:, 0].sum()
@@ -102,7 +106,7 @@ def problem_grouping(clients_array, time_slot, quad_constr, util_rate=1.5,
     min_av_max_caps = np.concatenate((time_slot_min, time_slot_av, time_slot_max))
     quad_constr_normalized = quad_constr / max_cap
     av_cap_bytime = time_slot.mean(axis=0) / max_cap
-    ##Grouping by time_length
+    # Group by time_length
     final_groups = []
     time_horizon = time_slot.shape[1]
     num_of_time_groups = int(time_horizon / time_len)
@@ -169,25 +173,13 @@ class DataSetMaker(Dataset):
         clients_list = state['cl']
         time_slot_capacity = state['tslot']
         quad_constr = state['quad_constr']
-        f_groups, tot_dem, min_av_max_caps, av_cap_bytime, q_c, min_util, max_util, tot_util = problem_grouping(
+        f_groups, tot_dem, mi_av_max_caps, av_cap_time, q_c, mi_util, ma_util, tot_util = problem_grouping(
             clients_list,
             time_slot_capacity,
             quad_constr)
-        inp, lab = data_preprocess(f_groups, tot_dem, q_c, min_av_max_caps, av_cap_bytime,
-                                   min_util, max_util, tot_util)
+        inp, lab = data_preprocess(f_groups, tot_dem, q_c, mi_av_max_caps, av_cap_time,
+                                   mi_util, ma_util, tot_util)
         return np.float32(inp), np.float32(lab)
-
-
-dataset = DataSetMaker()
-
-device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
-print("Device:", device)
-
-train_set, valid_set, test_set = random_split(dataset, [8000, 739, 700])
-
-train_loader = DataLoader(train_set, batch_size=8, shuffle=True, drop_last=False)
-val_loader = DataLoader(valid_set, batch_size=1)
-test_loader = DataLoader(test_set, batch_size=1)
 
 
 def scaled_dot_product(q, k, v):
@@ -239,9 +231,6 @@ class MultiheadAttention(nn.Module):
         o = self.o_proj(values)
 
         return o
-
-
-# In[12]:
 
 
 class EncoderBlock(nn.Module):
@@ -298,9 +287,6 @@ class TransformerEncoder(nn.Module):
         return x
 
 
-# In[13]:
-
-
 class PositionalEncoding(nn.Module):
 
     def __init__(self, d_model, max_len=5000):
@@ -329,9 +315,6 @@ class PositionalEncoding(nn.Module):
         return x
 
 
-# In[14]:
-
-
 class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
 
     def __init__(self, optimizer, warmup, max_iters):
@@ -350,12 +333,9 @@ class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
         return lr_factor
 
 
-# In[23]:
-
-
 class TransformerPredictor(pl.LightningModule):
 
-    def __init__(self, input_dim, model_dim, num_classes, num_heads, num_layers, lr, warmup, max_iters, dropout=0.0,
+    def __init__(self, input_dim, model_dim, num_classes, num_heads, max_iters, warmup, num_layers, lr, dropout=0.0,
                  input_dropout=0.0):
         """
         Inputs:
@@ -388,7 +368,7 @@ class TransformerPredictor(pl.LightningModule):
                                               dim_feedforward=2 * self.hparams.model_dim,
                                               num_heads=self.hparams.num_heads,
                                               dropout=self.hparams.dropout)
-        # Output classifier per sequence lement
+        # Output classifier per sequence element
         self.output_net = nn.Sequential(
             nn.Linear(self.hparams.model_dim, self.hparams.model_dim),
             nn.LayerNorm(self.hparams.model_dim),
@@ -412,13 +392,17 @@ class TransformerPredictor(pl.LightningModule):
         x = self.transformer(x)
         x = self.output_net(x)
         x = F.softmax(x, dim=-2)
-        # x = F.softmax(x, dim=1)
         return x
 
     def configure_optimizers(self):
         optimizer = optim.Adam(self.parameters(), lr=self.hparams.lr)
 
-        return optimizer
+        lr_scheduler = CosineWarmupScheduler(optimizer,
+                                             warmup=self.hparams.warmup,
+                                             max_iters=self.hparams.max_iters)
+
+        return [optimizer], [{'scheduler': lr_scheduler,
+                              'interval': 'epoch'}]
 
     def training_step(self, batch, batch_idx):
         raise NotImplementedError
@@ -437,29 +421,51 @@ class KnapsackPredictor(TransformerPredictor):
 
     def _calculate_loss(self, batch, mode="train"):
         inp_data, labels = batch
+        batch_size = labels.shape[0]
         preds = self.forward(inp_data)
-        loss1 = F.l1_loss(preds[:, :, 0], labels[:, :, 0])
-        loss2 = F.l1_loss(preds[:, :, 1], labels[:, :, 1])
-        loss3 = F.l1_loss(preds[:, :, 2], labels[:, :, 2])
+        loss1 = (1 / batch_size) * (torch.mean(torch.abs(preds[:, :-1, 0] - labels[:, :-1, 0])) + 1 / 720 * torch.mean(
+            torch.abs(preds[:, -1, 0] - labels[:, -1, 0])))
+        loss2 = 1 / batch_size * (torch.mean(torch.abs(preds[:, :-1, 1] - labels[:, :-1, 1])) + 1 / 720 * torch.mean(
+            torch.abs(preds[:, -1, 1] - labels[:, -1, 1])))
+        loss3 = 1 / batch_size * (torch.mean(torch.abs(preds[:, :-1, 2] - labels[:, :-1, 2])) + 1 / 720 * torch.mean(
+            torch.abs(preds[:, -1, 2] - labels[:, -1, 2])))
         loss = loss1 + loss2 + loss3
-        acc1 = ((preds[:, :, 0] - labels[:, :, 0]) / preds[:, :, 0]).abs().max()
-        acc2 = ((preds[:, :, 1] - labels[:, :, 1]) / preds[:, :, 1]).abs().max()
-        acc3 = ((preds[:, :, 2] - labels[:, :, 2]) / preds[:, :, 2]).abs().max()
-        acc4 = ((preds[:, :, 0] - labels[:, :, 0]) / preds[:, :, 0]).abs().mean()
-        acc5 = ((preds[:, :, 1] - labels[:, :, 1]) / preds[:, :, 1]).abs().mean()
-        acc6 = ((preds[:, :, 2] - labels[:, :, 2]) / preds[:, :, 2]).abs().mean()
 
-        # Logging
+        mse_error_1 = F.mse_loss(preds[:, :, 0], labels[:, :, 0])
+        mse_error_2 = F.mse_loss(preds[:, :, 1], labels[:, :, 1])
+        mse_error_3 = F.mse_loss(preds[:, :, 2], labels[:, :, 2])
+
+        non_zero_labels = labels[:, :, 0] != 0
+        relative_accuracy_1 = (
+                    abs(preds[non_zero_labels][:, 0] - labels[non_zero_labels][:, 0]) < 0.1 * labels[non_zero_labels][:,
+                                                                                              0]).sum()
+        relative_accuracy_1 += (preds[~non_zero_labels][:, 0] < (2 / 1500)).sum()
+        relative_accuracy_1 = relative_accuracy_1 / (preds.shape[0] * preds.shape[1])
+
+        relative_accuracy_2 = (
+                    abs(preds[non_zero_labels][:, 1] - labels[non_zero_labels][:, 1]) < 0.1 * labels[non_zero_labels][:,
+                                                                                              1]).sum()
+        relative_accuracy_2 += (preds[~non_zero_labels][:, 1] < 1e-4).sum()
+        relative_accuracy_2 = relative_accuracy_2 / (preds.shape[0] * preds.shape[1])
+
+        relative_accuracy_3 = (
+                    abs(preds[non_zero_labels][:, 2] - labels[non_zero_labels][:, 2]) < 0.1 * labels[non_zero_labels][:,
+                                                                                              2]).sum()
+        relative_accuracy_3 += (preds[~non_zero_labels][:, 2] < 1e-4).sum()
+        relative_accuracy_3 = relative_accuracy_3 / (preds.shape[0] * preds.shape[1])
+
+        #         Logging
         self.log(f"{mode}_loss", loss)
         self.log(f"{mode}_loss1", loss1)
         self.log(f"{mode}_loss2", loss2)
         self.log(f"{mode}_loss3", loss2)
-        self.log(f"{mode}_max_accuracy1", acc1)
-        self.log(f"{mode}_max_accuracy2", acc2)
-        self.log(f"{mode}_max_accuracy2", acc3)
-        self.log(f"{mode}_mean_accuracy1", acc4)
-        self.log(f"{mode}_mean_accuracy2", acc5)
-        self.log(f"{mode}_mean_accuracy2", acc6)
+        self.log(f"{mode}_mse_1", mse_error_1)
+        self.log(f"{mode}_mse_2", mse_error_2)
+        self.log(f"{mode}_mse_3", mse_error_3)
+        self.log(f"{mode}_relative_accuracy_1", relative_accuracy_1)
+        self.log(f"{mode}_relative_accuracy_2", relative_accuracy_2)
+        self.log(f"{mode}_relative_accuracy_3", relative_accuracy_3)
+
         return loss
 
     def training_step(self, batch, batch_idx):
@@ -482,6 +488,10 @@ class KnapsackPredictor(TransformerPredictor):
 CHECKPOINT_PATH = "C:\\Users\\zhira\\CSIE_PYTHON_PROJECTS\\UFP_FINAL"
 
 
+def get_current_time_version():
+    return time.strftime("%Y%m%d-%H%M%S")
+
+
 class WeightLoggingCallback(Callback):
     def on_epoch_end(self, trainer, pl_module):
         for name, param in pl_module.named_parameters():
@@ -498,27 +508,30 @@ class WeightLoggingCallback(Callback):
             trainer.logger.experiment.add_scalar(f'{name}_min', min_val, trainer.current_epoch)
 
 
-# In[27]:
-
-
 def train_knapsack(**kwargs):
     # Create a PyTorch Lightning trainer with the generation callback
-    root_dir = os.path.join(CHECKPOINT_PATH, "UfpCheckPointNew2")
+    root_dir = os.path.join(CHECKPOINT_PATH, "UfpCheckPoint")
+    logger = TensorBoardLogger(
+        save_dir="logs",  # Directory where logs will be saved
+        name="MyExperiment",  # Name of the experiment, it will be the main folder
+        version=get_current_time_version()  # Version of the current run (sub-folder)
+    )
     os.makedirs(root_dir, exist_ok=True)
     trainer = pl.Trainer(callbacks=[
-        ModelCheckpoint(dirpath=root_dir, filename='UfpCheckPointNew2', save_weights_only=True, mode="min",
+        ModelCheckpoint(dirpath=root_dir, filename='UfpCheckPoint', save_weights_only=True, mode="min",
                         monitor="val_loss"),
         LearningRateMonitor(logging_interval='epoch'),
         EarlyStopping(monitor="val_loss", min_delta=1e-7, patience=20, verbose=False, mode="min"),
         WeightLoggingCallback()],
         accelerator="gpu" if str(device).startswith("cuda") else "cpu",
+        # logger=logger,
         devices=1,
         max_epochs=150,
         log_every_n_steps=10)
     trainer.logger._default_hp_metric = None  # Optional logging argument that we don't need
 
     # Check whether pretrained model exists. If yes, load it and skip training
-    pretrained_filename = os.path.join(root_dir, "UfpCheckPointNew2.ckpt")
+    pretrained_filename = os.path.join(root_dir, "UfpCheckPoint.ckpt")
     if os.path.isfile(pretrained_filename):
         print("Found pretrained model, loading...")
         model = KnapsackPredictor.load_from_checkpoint(pretrained_filename)
@@ -540,11 +553,11 @@ def objective(trial: optuna.trial.Trial):
     model_dim = trial.suggest_int('model_dim', 108, 204, 12)
     num_heads = trial.suggest_int('num_heads', 2, 6, 2)
     num_layers = trial.suggest_int('num_layers', 2, 4)
-    lr = trial.suggest_float('learning_rate', 1e-5, 1e-2)
-    dropout = trial.suggest_float('dropout', 0, 0.2, step=0.1)
+    lr = trial.suggest_float('learning_rate', 1e-5, 1e-3)
+    # dropout = trial.suggest_float('dropout', 0, 0.2, step=0.1)
 
     # Create a model instance with the suggested hyperparameters
-    model = KnapsackPredictor(108, model_dim, 3, num_heads, num_layers, lr, dropout, 0.0)
+    model = KnapsackPredictor(108, model_dim, 3, num_heads, num_layers, lr, 0.0, 0.0)
 
     # Create a PyTorch Lightning trainer with the Optuna Pruner
     trainer = pl.Trainer(
@@ -560,28 +573,40 @@ def objective(trial: optuna.trial.Trial):
     return val_loss
 
 
-# In[29]:
-
 if __name__ == '__main__':
-    # knapsack_model, result = train_knapsack(input_dim=108,
-    #                                         model_dim=156,
-    #                                         num_heads=2,
-    #                                         num_classes=3,
-    #                                         num_layers=2,
-    #                                         dropout=0.0,
-    #                                         lr=28e-4,
-    #                                         warmup=20)
-    study = optuna.create_study(direction='minimize')
-    study.optimize(objective, n_trials=100)
+    dataset = DataSetMaker()
 
-    # Print the best hyperparameters
-    best_trial = study.best_trial
-    print(f"Best trial: {best_trial.params}")
+    device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
-    best_trial_dict = best_trial.params
-    best_trial_dict["value"] = best_trial.value
+    train_set, valid_set, test_set = random_split(dataset, [7439, 1000, 1000])
+    train_loader = DataLoader(train_set, batch_size=8, shuffle=True, drop_last=True)
+    val_loader = DataLoader(valid_set, batch_size=1)
+    test_loader = DataLoader(test_set, batch_size=1)
 
-    with open('best_trial.json', 'w') as outfile:
-        json.dump(best_trial_dict, outfile, indent=4)
+    knapsack_model, result = train_knapsack(input_dim=108, model_dim=156, num_heads=2, num_classes=3,
+                                            num_layers=2, dropout=0.0, lr=2.8e-4, warmup=20)
+    inps, labs = test_set.__getitem__(0)
+    inps = torch.from_numpy(np.float32(inps[None, :])).to(device)
+    pred = knapsack_model(inps)
+    pred = pred.cpu().detach().numpy().squeeze()
+    plt.scatter(pred[:-1, 0], labs[:-1, 0])
+    plt.plot([0, 0.1], [0, 0.1])
+    plt.show()
+    # study = optuna.create_study(direction='minimize')
+    # study.optimize(objective, n_trials=20)
+    #
+    # # Print the best hyperparameters
+    # best_trial = study.best_trial
+    # print(f"Best trial: {best_trial.params}")
+    #
+    # best_trial_dict = best_trial.params
+    # best_trial_dict["value"] = best_trial.value
+    #
+    # with open('best_trial_2.json', 'w') as outfile:
+    #     json.dump(best_trial_dict, outfile, indent=4)
 
-##
+    # with open('best_trial.json', 'r') as infile:
+    #     loaded_trial_data = json.load(infile)
+    #
+    # # Use the loaded data
+    # print(loaded_trial_data)

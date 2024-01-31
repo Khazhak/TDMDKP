@@ -93,7 +93,7 @@ def problem_grouping(clients_array, time_slot, quad_constr, util_rate=1.5,
     # Normalizing demands in each dimension by max capacity
     max_cap = time_slot.max()
     for group in demand_groups:
-        group[:, num_of_dims] /= max_cap
+        group[:, :num_of_dims] /= max_cap
     # sum of demands of the first dimension normalized by max capacity
     total_demand = 0
     for group in demand_groups:

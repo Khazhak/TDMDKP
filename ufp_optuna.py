@@ -121,11 +121,11 @@ def problem_grouping(clients_array, time_slot, quad_constr, util_rate=1.5,
             for _ in range(num_of_time_groups):
                 final_groups.append(demand_groups[i])
 
-    return final_groups, total_demand, min_av_max_caps, av_cap_bytime, quad_constr_normalized, min_util, max_util, total_utility
+    return final_groups, total_demand, min_av_max_caps, av_cap_bytime, quad_constr_normalized, min_util, max_util, total_utility, max_cap
 
 
 def data_preprocess(groups, total_demand, quad_cap, min_av_max_caps, av_cap_bytime,
-                    min_util, max_util, total_utility, num_of_dims=3, num_of_clients=1500, time_length=96):
+                    min_util, max_util, total_utility, max_cap, num_of_dims=3, num_of_clients=1500, time_length=96):
     length = len(groups)
     inputs = np.zeros((length + 1, 3 * num_of_dims + 1 + time_length + 2))
     labels = np.zeros((length + 1, 3))
@@ -173,13 +173,13 @@ class DataSetMaker(Dataset):
         clients_list = state['cl']
         time_slot_capacity = state['tslot']
         quad_constr = state['quad_constr']
-        f_groups, tot_dem, mi_av_max_caps, av_cap_time, q_c, mi_util, ma_util, tot_util = problem_grouping(
+        f_groups, tot_dem, mi_av_max_caps, av_cap_time, q_c, mi_util, ma_util, tot_util, max_cap = problem_grouping(
             clients_list,
             time_slot_capacity,
             quad_constr)
         inp, lab = data_preprocess(f_groups, tot_dem, q_c, mi_av_max_caps, av_cap_time,
-                                   mi_util, ma_util, tot_util)
-        return np.float32(inp), np.float32(lab)
+                                   mi_util, ma_util, tot_util, max_cap)
+        return np.float32(inp), np.float32(lab), tot_util, tot_dem, max_cap
 
 
 def scaled_dot_product(q, k, v):
@@ -420,14 +420,17 @@ class TransformerPredictor(pl.LightningModule):
 class KnapsackPredictor(TransformerPredictor):
 
     def _calculate_loss(self, batch, mode="train"):
-        inp_data, labels = batch
+        inp_data, labels, tot_utils, tot_demands, max_caps = batch
         batch_size = labels.shape[0]
         preds = self.forward(inp_data)
-        loss1 = (1 / batch_size) * (torch.mean(torch.abs(preds[:, :-1, 0] - labels[:, :-1, 0])) + 1 / 720 * torch.mean(
+        loss1 = (1 / batch_size) * (
+                torch.mean(torch.abs(preds[:, :-1, 0] - labels[:, :-1, 0])) + 2 / preds.shape[1] * torch.mean(
             torch.abs(preds[:, -1, 0] - labels[:, -1, 0])))
-        loss2 = 1 / batch_size * (torch.mean(torch.abs(preds[:, :-1, 1] - labels[:, :-1, 1])) + 1 / 720 * torch.mean(
+        loss2 = 1 / batch_size * (
+                torch.mean(torch.abs(preds[:, :-1, 1] - labels[:, :-1, 1])) + 2 / preds.shape[1] * torch.mean(
             torch.abs(preds[:, -1, 1] - labels[:, -1, 1])))
-        loss3 = 1 / batch_size * (torch.mean(torch.abs(preds[:, :-1, 2] - labels[:, :-1, 2])) + 1 / 720 * torch.mean(
+        loss3 = 1 / batch_size * (
+                torch.mean(torch.abs(preds[:, :-1, 2] - labels[:, :-1, 2])) + 2 / preds.shape[1] * torch.mean(
             torch.abs(preds[:, -1, 2] - labels[:, -1, 2])))
         loss = loss1 + loss2 + loss3
 
@@ -435,25 +438,16 @@ class KnapsackPredictor(TransformerPredictor):
         mse_error_2 = F.mse_loss(preds[:, :, 1], labels[:, :, 1])
         mse_error_3 = F.mse_loss(preds[:, :, 2], labels[:, :, 2])
 
-        non_zero_labels = labels[:, :, 0] != 0
-        relative_accuracy_1 = (
-                    abs(preds[non_zero_labels][:, 0] - labels[non_zero_labels][:, 0]) < 0.1 * labels[non_zero_labels][:,
-                                                                                              0]).sum()
-        relative_accuracy_1 += (preds[~non_zero_labels][:, 0] < (2 / 1500)).sum()
-        relative_accuracy_1 = relative_accuracy_1 / (preds.shape[0] * preds.shape[1])
-
-        relative_accuracy_2 = (
-                    abs(preds[non_zero_labels][:, 1] - labels[non_zero_labels][:, 1]) < 0.1 * labels[non_zero_labels][:,
-                                                                                              1]).sum()
-        relative_accuracy_2 += (preds[~non_zero_labels][:, 1] < 1e-4).sum()
-        relative_accuracy_2 = relative_accuracy_2 / (preds.shape[0] * preds.shape[1])
-
-        relative_accuracy_3 = (
-                    abs(preds[non_zero_labels][:, 2] - labels[non_zero_labels][:, 2]) < 0.1 * labels[non_zero_labels][:,
-                                                                                              2]).sum()
-        relative_accuracy_3 += (preds[~non_zero_labels][:, 2] < 1e-4).sum()
-        relative_accuracy_3 = relative_accuracy_3 / (preds.shape[0] * preds.shape[1])
-
+        expanded_utils = tot_utils.unsqueeze(1).expand(-1, preds.shape[1])
+        expanded_demands = tot_demands.unsqueeze(1).expand(-1, preds.shape[1])
+        expanded_caps = max_caps.unsqueeze(1).expand(-1, preds.shape[1])
+        relative_accuracy_1 = (abs(preds[:, :, 0] - labels[:, :, 0]) < (2 / 1500)).sum() / (
+                preds.shape[0] * preds.shape[1])
+        relative_accuracy_2 = (abs(preds[:, :, 0] - labels[:, :, 0]) < 10 / (
+                expanded_demands * expanded_caps)).sum() / (
+                                      preds.shape[0] * preds.shape[1])
+        relative_accuracy_3 = (abs(preds[:, :, 0] - labels[:, :, 0]) < 10 / (expanded_utils * 400)).sum() / (
+                preds.shape[0] * preds.shape[1])
         #         Logging
         self.log(f"{mode}_loss", loss)
         self.log(f"{mode}_loss1", loss1)
@@ -521,12 +515,12 @@ def train_knapsack(**kwargs):
         ModelCheckpoint(dirpath=root_dir, filename='UfpCheckPoint', save_weights_only=True, mode="min",
                         monitor="val_loss"),
         LearningRateMonitor(logging_interval='epoch'),
-        EarlyStopping(monitor="val_loss", min_delta=1e-7, patience=20, verbose=False, mode="min"),
+        EarlyStopping(monitor="val_loss", min_delta=1e-7, patience=30, verbose=False, mode="min"),
         WeightLoggingCallback()],
         accelerator="gpu" if str(device).startswith("cuda") else "cpu",
         # logger=logger,
         devices=1,
-        max_epochs=150,
+        max_epochs=40,
         log_every_n_steps=10)
     trainer.logger._default_hp_metric = None  # Optional logging argument that we don't need
 
@@ -583,15 +577,15 @@ if __name__ == '__main__':
     val_loader = DataLoader(valid_set, batch_size=1)
     test_loader = DataLoader(test_set, batch_size=1)
 
-    knapsack_model, result = train_knapsack(input_dim=108, model_dim=156, num_heads=2, num_classes=3,
-                                            num_layers=2, dropout=0.0, lr=2.8e-4, warmup=20)
-    inps, labs = test_set.__getitem__(0)
-    inps = torch.from_numpy(np.float32(inps[None, :])).to(device)
-    pred = knapsack_model(inps)
-    pred = pred.cpu().detach().numpy().squeeze()
-    plt.scatter(pred[:-1, 0], labs[:-1, 0])
-    plt.plot([0, 0.1], [0, 0.1])
-    plt.show()
+    knapsack_model, result = train_knapsack(input_dim=108, model_dim=180, num_heads=2, num_classes=3,
+                                            num_layers=2, dropout=0.0, lr=2.8e-4, warmup=10)
+    # inps, labs, _, _, _ = test_set.__getitem__(0)
+    # inps = torch.from_numpy(np.float32(inps[None, :])).to(device)
+    # pred = knapsack_model(inps)
+    # pred = pred.cpu().detach().numpy().squeeze()
+    # plt.scatter(pred[:-1, 0], labs[:-1, 0])
+    # plt.plot([0, 0.04], [0, 0.04])
+    # plt.show()
     # study = optuna.create_study(direction='minimize')
     # study.optimize(objective, n_trials=20)
     #

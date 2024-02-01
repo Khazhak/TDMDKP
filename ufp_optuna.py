@@ -69,7 +69,7 @@ def problem_grouping(clients_array, time_slot, quad_constr, util_rate=1.5,
                 clients[:, -2] > steps[i - 1])
         util_groups.append(clients[np.where(bool_idx)[0]])
     # Normalizing by max_utility
-    clients /= max_utility
+    clients[:, -2] /= max_utility
     max_util = clients[:, -2].max()
     min_util = clients[:, -2].min()
     total_utility = clients[:, -2].sum()

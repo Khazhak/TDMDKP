@@ -277,20 +277,23 @@ def gurobi_maximization(time_slot, quad_constr, groups, total_demand, tot_util, 
         if group.size > 0:
             num_of_group_clients = group.shape[0]
             utils = group[:, -2]
-            demands = group[:, -2]
+            demands = group[:, 0]
             ufp_model = gp.Model()
             opt_choice = ufp_model.addVars(num_of_group_clients, vtype=GRB.BINARY, name="opt_choice")
+            W = sum_demands[i]
+            U = sum_utils[i]
             # ufp_model.addConstr(
-            #     (gp.quicksum([opt_choice[index] * utils[index] for index in range(num_of_group_clients)]) <= sum_utils[i]), name='utility')
+            #     (gp.quicksum([opt_choice[index] * utils[index] for index in range(num_of_group_clients)]) <= U), name='utility')
             ufp_model.addConstr(
-                (gp.quicksum([opt_choice[index] * demands[index] for index in range(num_of_group_clients)]) <=
-                 sum_demands[i]), name='demand')
+                (gp.quicksum([opt_choice[index] * demands[index] for index in range(num_of_group_clients)]) <= W),
+                name='demand')
             ufp_model.setObjective(gp.quicksum([opt_choice[i] * utils[i] for i in range(num_of_group_clients)]),
                                    GRB.MAXIMIZE)
             ufp_model.optimize()
             answer = np.array([item.x for item in ufp_model.getVars()])
-            choice = np.where([answer == 1])
-            selected_items.extend(group[choice])
+            chosen = group[np.where([answer == 1])[0]]
+            selected_items.extend(chosen)
+            total_utility += chosen[:, -2].sum()
     selected_items, total_utility = valid_maker(selected_items, time_slot, quad_constr, max_cap, num_of_dims,
                                                 time_length, total_utility)
     if len(selected_items) > 0:
@@ -300,64 +303,63 @@ def gurobi_maximization(time_slot, quad_constr, groups, total_demand, tot_util, 
 
 
 if __name__ == '__main__':
-    number_of_iterations = 2
+    number_of_iterations = 50
     generator = instance_generator(number_of_iterations)
-    # algorithm_1_results = np.zeros(number_of_iterations)
+    algorithm_1_results = np.zeros(number_of_iterations)
     algorithm_2_results = np.zeros(number_of_iterations)
-    # algorithm_3_results = np.zeros(number_of_iterations)
-    # algorithm_4_results = np.zeros(number_of_iterations)
+    algorithm_3_results = np.zeros(number_of_iterations)
+    algorithm_4_results = np.zeros(number_of_iterations)
     label_results = np.zeros(number_of_iterations)
-    for idx, instance in enumerate(generator):
+    for idx, instance in tqdm(enumerate(generator),'Main Process : '):
         print(f'Sample No : {idx}')
         inp, lab, clients_list, time_slot_capacity, quad_constr, f_groups, tot_dem, tot_util, ans = instance
         inp = torch.from_numpy(np.float32(inp[None, :])).to(device)
         y_pred = knapsack_model(inp)
         y_pred = y_pred.cpu().detach().numpy().squeeze()
-        # selected_items, final_total_utility = selection_algorithm_count_util_group(time_slot_capacity,
-        #                                                                            quad_constr,
-        #                                                                            f_groups,
-        #                                                                            tot_util,
-        #                                                                            y_pred)
-        #
+        selected_items, final_total_utility = selection_algorithm_count_util_group(time_slot_capacity,
+                                                                                   quad_constr,
+                                                                                   f_groups,
+                                                                                   tot_util,
+                                                                                   y_pred)
+
         selected_items_2, final_total_utility_2 = selection_algorithm_count_util_all(time_slot_capacity, quad_constr,
                                                                                      f_groups,
                                                                                      tot_util,
                                                                                      y_pred)
-        # s_time = time()
-        # selected_items_3, final_total_utility_3 = main_algorithm(time_slot_capacity,quad_constr,f_groups, tot_dem, y_pred)
-        # selected_items_4, final_total_utility_4 = gurobi_maximization(time_slot_capacity, quad_constr, f_groups,
-        #                                                               tot_dem, tot_util,
-        #                                                               y_pred)
-        # print('time : ', time() - s_time)
-        # algorithm_1_results[idx] = final_total_utility * 400
+
+        selected_items_3, final_total_utility_3 = main_algorithm(time_slot_capacity,quad_constr,f_groups, tot_dem, y_pred)
+        selected_items_4, final_total_utility_4 = gurobi_maximization(time_slot_capacity, quad_constr, f_groups,
+                                                                      tot_dem, tot_util,
+                                                                      y_pred)
+        algorithm_1_results[idx] = final_total_utility * 400
         algorithm_2_results[idx] = final_total_utility_2 * 400
-        # algorithm_3_results[idx] = final_total_utility_3 * 400
-        # algorithm_4_results[idx] = final_total_utility_4 * 400
+        algorithm_3_results[idx] = final_total_utility_3 * 400
+        algorithm_4_results[idx] = final_total_utility_4 * 400
         label_results[idx] = clients_list[clients_list[:, -1] == 1.0][:, -2].sum() * 400
-        # print('selected_items_shape: ', selected_items.shape)
-        # print('selected_utility', final_total_utility * 400)
+        print('selected_items_shape: ', selected_items.shape)
+        print('selected_utility', final_total_utility * 400)
         print('selected_items_shape_2: ', selected_items_2.shape)
         print('selected_utility_2', final_total_utility_2 * 400)
-        # print('selected_items_shape_3: ', selected_items_3.shape)
-        # print('selected_utility_3', final_total_utility_3 * 400)
-        # print('selected_items_shape_4: ', len(selected_items_4))
-        # print('selected_utility_4', final_total_utility_4 * 400)
+        print('selected_items_shape_3: ', selected_items_3.shape)
+        print('selected_utility_3', final_total_utility_3 * 400)
+        print('selected_items_shape_4: ', len(selected_items_4))
+        print('selected_utility_4', final_total_utility_4 * 400)
         print('answer_shape : ', clients_list[clients_list[:, -1] == 1].shape)
         print('answer_utility : ', clients_list[clients_list[:, -1] == 1.0][:, -2].sum() * 400)
-    # np.savez('results/results.npz', algorithm=algorithm_1_results, labels=label_results)
-    # np.savez('results/results2.npz', algorithm=algorithm_2_results, labels=label_results)
-    # np.savez('results/results3.npz', algorithm=algorithm_3_results, labels=label_results)
-    # np.savez('results/results4.npz', algorithm=algorithm_4_results, labels=label_results)
+    np.savez('results/results.npz', algorithm=algorithm_1_results, labels=label_results)
+    np.savez('results/results2.npz', algorithm=algorithm_2_results, labels=label_results)
+    np.savez('results/results3.npz', algorithm=algorithm_3_results, labels=label_results)
+    np.savez('results/results4.npz', algorithm=algorithm_4_results, labels=label_results)
     # file = np.load('results/results.npz')
     # algorithm_1_results = file['algorithm1']
     # label_results = file['labels']
-    # percentage1 = algorithm_1_results / label_results * 100
+    percentage1 = algorithm_1_results / label_results * 100
     percentage2 = algorithm_2_results / label_results * 100
-    # percentage3 = algorithm_3_results / label_results * 100
-    # percentage4 = algorithm_4_results / label_results * 100
+    percentage3 = algorithm_3_results / label_results * 100
+    percentage4 = algorithm_4_results / label_results * 100
     indices = np.arange(number_of_iterations)
-    # plt.scatter(indices, percentage1, color='red', label='algorithm1', s=5)
+    plt.scatter(indices, percentage1, color='red', label='algorithm1', s=5)
     plt.scatter(indices, percentage2, color='blue', label='algorithm1', s=5)
-    # plt.scatter(indices, percentage3, color='green', label='algorithm3', s=5)
-    # plt.scatter(indices, percentage4, color='orange', label='algorithm4', s=5)
+    plt.scatter(indices, percentage3, color='green', label='algorithm3', s=5)
+    plt.scatter(indices, percentage4, color='orange', label='algorithm4', s=5)
     plt.show()

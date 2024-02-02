@@ -310,7 +310,7 @@ if __name__ == '__main__':
     algorithm_3_results = np.zeros(number_of_iterations)
     algorithm_4_results = np.zeros(number_of_iterations)
     label_results = np.zeros(number_of_iterations)
-    for idx, instance in tqdm(enumerate(generator),'Main Process : '):
+    for idx, instance in enumerate(generator):
         print(f'Sample No : {idx}')
         inp, lab, clients_list, time_slot_capacity, quad_constr, f_groups, tot_dem, tot_util, ans = instance
         inp = torch.from_numpy(np.float32(inp[None, :])).to(device)

@@ -61,9 +61,12 @@ def validation_check(selected_items, time_slot, quad_constr, max_cap, num_of_dim
 
 
 def valid_maker(selected_items, time_slot, quad_constr, max_cap, num_of_dims, time_length, total_utility,
-                final_total_utility=0):
+                final_total_utility=0, attempts=1500):
     is_correct = validation_check(selected_items, time_slot, quad_constr, max_cap, num_of_dims, time_length)
-    while not np.all(is_correct) and total_utility > final_total_utility and len(selected_items) > 0:
+    violated = not np.all(is_correct)
+    attempt = 1
+    while not np.all(is_correct) and total_utility > final_total_utility and len(
+            selected_items) > 0 and attempt <= attempts:
         min_utility = 100000
         min_item_index = 0
         rows, cols = np.where(~is_correct)
@@ -79,9 +82,11 @@ def valid_maker(selected_items, time_slot, quad_constr, max_cap, num_of_dims, ti
         total_utility = sum([item[-2] for item in selected_items])
         is_correct = validation_check(selected_items, time_slot, quad_constr, max_cap, num_of_dims, time_length)
         if np.all(is_correct):
+            violated = False
             del is_correct
             break
-    return selected_items, total_utility
+        attempt += 1
+    return selected_items, total_utility, violated
 
 
 def selection_algorithm_count_util_group(time_slot, quad_constr, groups, tot_util, y_pred, num_of_clients=1500):
@@ -156,7 +161,55 @@ def selection_algorithm_count_util_group(time_slot, quad_constr, groups, tot_uti
     return np.stack(final_selected_items), final_total_utility
 
 
-def selection_algorithm_count_util_all(time_slot, quad_constr, groups, tot_util, y_pred, num_of_clients=1500):
+def selection_algorithm_count_util_group_new(time_slot, quad_constr, groups, tot_util, y_pred, num_of_clients=1500):
+    if type(y_pred) != np.ndarray:
+        prediction = y_pred.cpu().detach().numpy()
+    else:
+        prediction = y_pred
+
+    num_of_dims = time_slot.shape[0]
+    time_length = time_slot.shape[1]
+    max_cap = time_slot.max()
+
+    sum_utils = prediction[:, 2] * tot_util
+
+    final_total_utility = 0
+    final_selected_items = []
+
+    for _ in tqdm(range(100), desc='Progress bar'):  # 100
+        total_utility = 0
+        selected_items = []
+        rand_perm = np.random.permutation(len(groups))
+        for gr_num in rand_perm:
+            group = groups[gr_num]
+            if group.size > 0:
+                sel_size = min(math.ceil(prediction[gr_num][0] * num_of_clients), group.shape[0])
+                prob_vec_uniform = np.ones(group.shape[0]) / group.shape[0]
+                for _ in range(5):
+                    selected_indices = np.random.choice(range(group.shape[0]), sel_size, replace=False,
+                                                        p=prob_vec_uniform)
+                    selection = group[selected_indices]
+                    selected_utility_sum = selection[:, -2].sum()
+                    temp_selected_items = selected_items + list(selection)
+                    is_correct = validation_check(temp_selected_items, time_slot, quad_constr, max_cap, num_of_dims,
+                                                  time_length)
+                    if np.abs(selected_utility_sum - sum_utils[gr_num]) <= 1 / group.shape[0] * sum_utils[gr_num]:
+                        if np.all(is_correct):
+                            selected_items = temp_selected_items
+                            total_utility += selected_utility_sum
+                            break
+        if total_utility > final_total_utility:
+            final_total_utility = total_utility
+            final_selected_items = selected_items
+    gc.collect()
+    if len(final_selected_items) > 0:
+        return np.stack(final_selected_items), final_total_utility
+    else:
+        return [], 0
+
+
+def selection_algorithm_count_util_all(time_slot, quad_constr, groups, tot_util, y_pred, num_of_clients=1500,
+                                       attempts=1500):
     if type(y_pred) != np.ndarray:
         prediction = y_pred.cpu().detach().numpy()
     else:
@@ -177,7 +230,7 @@ def selection_algorithm_count_util_all(time_slot, quad_constr, groups, tot_util,
                 best_vec = np.array([])
                 # prob_vec=np.array([item[-2]/group_util_sum for item in group])
                 prob_vec_uniform = np.ones(group.shape[0]) / group.shape[0]
-                for id in range(50):
+                for id in range(10):
                     sel_size = min(math.ceil(prediction[i][0] * num_of_clients), group.shape[0])
                     selection = np.random.choice(range(group.shape[0]), sel_size, replace=False, p=prob_vec_uniform)
                     sel_vec = group[selection]
@@ -189,13 +242,19 @@ def selection_algorithm_count_util_all(time_slot, quad_constr, groups, tot_util,
                     total_utility += max_res
                     selected_items.extend(best_vec)
 
-        selected_items, total_utility = valid_maker(selected_items, time_slot, quad_constr, max_cap, num_of_dims,
-                                                    time_length, total_utility, final_total_utility)
-        if final_total_utility < total_utility:
-            final_selected_items = selected_items.copy()
-            final_total_utility = total_utility
+        selected_items, total_utility, violated = valid_maker(selected_items, time_slot, quad_constr, max_cap,
+                                                              num_of_dims,
+                                                              time_length, total_utility, final_total_utility,
+                                                              attempts=attempts)
+        if not violated:
+            if final_total_utility < total_utility:
+                final_selected_items = selected_items.copy()
+                final_total_utility = total_utility
     gc.collect()
-    return np.stack(final_selected_items), final_total_utility
+    if len(final_selected_items) > 0:
+        return np.stack(final_selected_items), final_total_utility
+    else:
+        return [], 0
 
 
 def innerfunction(items: np.ndarray, W):
@@ -231,7 +290,7 @@ def innerfunction(items: np.ndarray, W):
     return [index for _, index in solution]
 
 
-def main_algorithm(time_slot, quad_constr, groups, total_demand, y_pred):
+def main_algorithm(time_slot, quad_constr, groups, total_demand, y_pred, attempts=1500):
     if type(y_pred) != np.ndarray:
         prediction = y_pred.cpu().detach().numpy()
     else:
@@ -251,16 +310,17 @@ def main_algorithm(time_slot, quad_constr, groups, total_demand, y_pred):
             choice = innerfunction(demands, W)
             total_utility += group[choice][:, -2].sum()
             selected_items.extend(group[choice])
-    selected_items, total_utility = valid_maker(selected_items, time_slot, quad_constr, max_cap, num_of_dims,
-                                                time_length, total_utility)
+    selected_items, total_utility, violated = valid_maker(selected_items, time_slot, quad_constr, max_cap,
+                                                          num_of_dims,
+                                                          time_length, total_utility, attempts=attempts)
 
-    if len(selected_items) > 0:
+    if not violated and len(selected_items) > 0:
         return np.stack(selected_items), total_utility
     else:
-        return selected_items, total_utility
+        return [], 0
 
 
-def gurobi_maximization(time_slot, quad_constr, groups, total_demand, tot_util, y_pred):
+def gurobi_maximization(time_slot, quad_constr, groups, total_demand, tot_util, y_pred, attempts=1500):
     if type(y_pred) != np.ndarray:
         prediction = y_pred.cpu().detach().numpy()
     else:
@@ -269,7 +329,7 @@ def gurobi_maximization(time_slot, quad_constr, groups, total_demand, tot_util, 
     time_length = time_slot.shape[1]
     max_cap = time_slot.max()
     sum_demands = prediction[:, 1] * total_demand
-    sum_utils = prediction[:, 2] * tot_util
+    # sum_utils = prediction[:, 2] * tot_util
 
     total_utility = 0
     selected_items = []
@@ -281,7 +341,7 @@ def gurobi_maximization(time_slot, quad_constr, groups, total_demand, tot_util, 
             ufp_model = gp.Model()
             opt_choice = ufp_model.addVars(num_of_group_clients, vtype=GRB.BINARY, name="opt_choice")
             W = sum_demands[i]
-            U = sum_utils[i]
+            # U = sum_utils[i]
             # ufp_model.addConstr(
             #     (gp.quicksum([opt_choice[index] * utils[index] for index in range(num_of_group_clients)]) <= U), name='utility')
             ufp_model.addConstr(
@@ -294,12 +354,12 @@ def gurobi_maximization(time_slot, quad_constr, groups, total_demand, tot_util, 
             chosen = group[np.where([answer == 1])[0]]
             selected_items.extend(chosen)
             total_utility += chosen[:, -2].sum()
-    selected_items, total_utility = valid_maker(selected_items, time_slot, quad_constr, max_cap, num_of_dims,
-                                                time_length, total_utility)
-    if len(selected_items) > 0:
+    selected_items, total_utility, violated = valid_maker(selected_items, time_slot, quad_constr, max_cap, num_of_dims,
+                                                          time_length, total_utility, attempts=attempts)
+    if not violated and len(selected_items) > 0:
         return np.stack(selected_items), total_utility
     else:
-        return selected_items, total_utility
+        return [], 0
 
 
 if __name__ == '__main__':
@@ -327,7 +387,8 @@ if __name__ == '__main__':
                                                                                      tot_util,
                                                                                      y_pred)
 
-        selected_items_3, final_total_utility_3 = main_algorithm(time_slot_capacity,quad_constr,f_groups, tot_dem, y_pred)
+        selected_items_3, final_total_utility_3 = main_algorithm(time_slot_capacity, quad_constr, f_groups, tot_dem,
+                                                                 y_pred)
         selected_items_4, final_total_utility_4 = gurobi_maximization(time_slot_capacity, quad_constr, f_groups,
                                                                       tot_dem, tot_util,
                                                                       y_pred)

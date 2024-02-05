@@ -70,6 +70,7 @@ def valid_maker(selected_items, time_slot, quad_constr, max_cap, num_of_dims, ti
         min_utility = 100000
         min_item_index = 0
         rows, cols = np.where(~is_correct)
+        rows = np.array(list(set(rows)))
         times_f = rows + 1  # In which time step the violation occurs
         time_indices = num_of_dims + 1 + times_f
         for item in range(len(selected_items)):

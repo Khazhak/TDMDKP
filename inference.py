@@ -363,6 +363,24 @@ def gurobi_maximization(time_slot, quad_constr, groups, total_demand, tot_util, 
         return [], 0
 
 
+def ldf(clients, quad_constr, time_slot_capacity):
+    num_of_dims = time_slot_capacity.shape[0]
+    time_length = time_slot_capacity.shape[1]
+    demands = np.array([np.sum(client[:num_of_dims] ** 2) for client in clients])
+    indices = np.argsort(demands)
+    selected_items = []
+    total_utility = 0
+    for index in indices:
+        temp_selection = selected_items + [clients[index]]
+        is_valid = validation_check(temp_selection, time_slot_capacity, quad_constr, 1, num_of_dims, time_length)
+        if np.all(is_valid):
+            selected_items += [clients[index]]
+            total_utility += clients[index][-2]
+    if selected_items:
+        return np.stack(selected_items), total_utility
+    return selected_items, total_utility
+
+
 if __name__ == '__main__':
     number_of_iterations = 50
     generator = instance_generator(number_of_iterations)

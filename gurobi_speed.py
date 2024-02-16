@@ -80,17 +80,17 @@ def problem_constructor(filename, num_of_clients, arrival_time='uniform', end_ti
 
     ufp_model.setObjective(gp.quicksum([opt_choice[i] * clients[i][-2] for i in range(num_of_clients)]),
                            GRB.MAXIMIZE)
-    np.savez(f'problem_states_new//{filename}', cl=clients, tslot=time_slot_capacity, quad_constr=B_constraint)
-    ufp_model.write(f"problem_states_new//model_{filename}.lp")
+    np.savez(f'{filename}', cl=clients, tslot=time_slot_capacity, quad_constr=B_constraint)
+    ufp_model.write(f"model_{filename}.lp")
 
 
 def problem_reader(filename):
-    data = np.load(f'problem_states_new//{filename}.npz')
+    data = np.load(f'{filename}.npz')
     clients = data['cl']
     time_slot_capacity = data['tslot']
     B_constraint = data['quad_constr']
     data.close()
-    ufp_model = gp.read(f"problem_states_new//model_{filename}.lp")
+    ufp_model = gp.read(f"model_{filename}.lp")
 
     return clients, time_slot_capacity, B_constraint, ufp_model
 
@@ -117,7 +117,7 @@ def problem_solver(ufp_model, initial_solution=None):
     return answer, ufp_model.ObjVal
 
 
-def selection_algorithm_count_util_all_infeasible(time_slot, groups, tot_util, y_pred, num_of_clients=1500, ):
+def selection_algorithm_count_util_all_infeasible(groups, tot_util, y_pred, num_of_clients=1500, ):
     if type(y_pred) != np.ndarray:
         prediction = y_pred.cpu().detach().numpy()
     else:
@@ -156,8 +156,9 @@ def selection_algorithm_count_util_all_infeasible(time_slot, groups, tot_util, y
 
 
 if __name__ == '__main__':
+    problem_size = 1500
     # Need to be executed only once
-    problem_constructor('test_example', 1500, arrival_time='uniform', end_time='uniform',
+    problem_constructor('test_example', problem_size, arrival_time='uniform', end_time='uniform',
                         util_demand_relation='quadratic')
     ###################################################################################
     CHECKPOINT_PATH = "Checkpoint Path"
@@ -181,35 +182,34 @@ if __name__ == '__main__':
     selected_items_feasible, _ = selection_algorithm_count_util_all(time_slot_capacity, quad_constr,
                                                                     f_groups,
                                                                     tot_util,
-                                                                    y_pred)
-    selected_items_infeasible, _ = selection_algorithm_count_util_all_infeasible(time_slot_capacity,
-                                                                                 f_groups,
-                                                                                 tot_util,
-                                                                                 y_pred)
+                                                                    y_pred, num_of_clients=problem_size, attempts=100)
+    selected_items_infeasible, _ = selection_algorithm_count_util_all_infeasible(f_groups, tot_util, y_pred,
+                                                                                 num_of_clients=problem_size)
 
-    selected_indices = selected_items_feasible[:, -1]
+    if len(selected_items_feasible) != 0:
+        selected_indices = selected_items_feasible[:, -1].astype(np.int32)
 
-    initial_solution = np.zeros(1500, dtype=np.float32)
-    initial_solution[selected_indices] = 1.0
+        initial_solution = np.zeros(problem_size, dtype=np.float32)
+        initial_solution[selected_indices] = 1.0
 
-    # With initial feasible solution
-    s_time = time.time()
-    ans_1, obj_1 = problem_solver(ufp_model, initial_solution)
-    run_time = time.time() - s_time
-    print('With initial feasible solution:')
-    print(f'Time : {run_time},Objective : {obj_1}')
-    # Without initial solution
-    s_time = time.time()
-    ans_2, obj_2 = problem_solver(ufp_model)
-    run_time = time.time() - s_time
-    print('Without initial solution:')
-    print(f'Time : {run_time},Objective : {obj_2}')
-    # With initial infeasible solution
-    selected_indices = selected_items_infeasible[:, -1]
-    initial_solution = np.zeros(1500, dtype=np.float32)
-    initial_solution[selected_indices] = 1.0
-    s_time = time.time()
-    ans_3, obj_3 = problem_solver(ufp_model, initial_solution)
-    run_time = time.time() - s_time
-    print('With initial infeasible solution:')
-    print(f'Time : {run_time},Objective : {obj_3}')
+        # With initial feasible solution
+        s_time = time.time()
+        ans_1, obj_1 = problem_solver(ufp_model, initial_solution)
+        run_time = time.time() - s_time
+        print('With initial feasible solution:')
+        print(f'Time : {run_time},Objective : {obj_1}')
+        # Without initial solution
+        s_time = time.time()
+        ans_2, obj_2 = problem_solver(ufp_model)
+        run_time = time.time() - s_time
+        print('Without initial solution:')
+        print(f'Time : {run_time},Objective : {obj_2}')
+        # With initial infeasible solution
+        selected_indices = selected_items_infeasible[:, -1].astype(np.int32)
+        initial_solution = np.zeros(problem_size, dtype=np.float32)
+        initial_solution[selected_indices] = 1.0
+        s_time = time.time()
+        ans_3, obj_3 = problem_solver(ufp_model, initial_solution)
+        run_time = time.time() - s_time
+        print('With initial infeasible solution:')
+        print(f'Time : {run_time},Objective : {obj_3}')

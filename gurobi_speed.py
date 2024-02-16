@@ -95,8 +95,7 @@ def problem_reader(filename):
     return clients, time_slot_capacity, B_constraint, ufp_model
 
 
-def problem_solver(ufp_model, initial_solution=None):
-    size = initial_solution.shape[0]
+def problem_solver(ufp_model, initial_solution=None, size=1500):
     ufp_model.setParam('MIPGap', 1e-3)
     ufp_model.setParam('IntFeasTol', 1e-6)
     if initial_solution is not None:
@@ -195,13 +194,13 @@ if __name__ == '__main__':
 
         # With initial feasible solution
         s_time = time.time()
-        ans_1, obj_1 = problem_solver(ufp_model, initial_solution)
+        ans_1, obj_1 = problem_solver(ufp_model, initial_solution, problem_size)
         run_time = time.time() - s_time
         print('With initial feasible solution:')
         print(f'Time : {run_time},Objective : {obj_1}')
         # Without initial solution
         s_time = time.time()
-        ans_2, obj_2 = problem_solver(ufp_model)
+        ans_2, obj_2 = problem_solver(ufp_model, size=problem_size)
         run_time = time.time() - s_time
         print('Without initial solution:')
         print(f'Time : {run_time},Objective : {obj_2}')
@@ -210,7 +209,7 @@ if __name__ == '__main__':
         initial_solution = np.zeros(problem_size, dtype=np.float32)
         initial_solution[selected_indices] = 1.0
         s_time = time.time()
-        ans_3, obj_3 = problem_solver(ufp_model, initial_solution)
+        ans_3, obj_3 = problem_solver(ufp_model, initial_solution, problem_size)
         run_time = time.time() - s_time
         print('With initial infeasible solution:')
         print(f'Time : {run_time},Objective : {obj_3}')

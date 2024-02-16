@@ -96,12 +96,13 @@ def problem_reader(filename):
 
 
 def problem_solver(ufp_model, initial_solution=None):
+    size = initial_solution.shape[0]
     ufp_model.setParam('MIPGap', 1e-3)
     ufp_model.setParam('IntFeasTol', 1e-6)
-    if initial_solution:
+    if initial_solution is not None:
         variables = ufp_model.getVars()
-        for i, v in enumerate(variables):
-            v.start = initial_solution[i]
+        for index in range(len(variables)):
+            variables[index].start = initial_solution[index]
     try:
         c = time.time()
         ufp_model.optimize()
@@ -109,9 +110,9 @@ def problem_solver(ufp_model, initial_solution=None):
     except GurobiError as e:
         if 'Model too large for size-limited license' in str(e):
             print(f"Skipping problem due to license size limitation.")
-            return
+            return np.zeros(size), 0
         print(f"Error encountered for problem: {e}")
-        return
+        return np.zeros(size), 0
     answer = np.array([item.x for item in ufp_model.getVars()])
 
     return answer, ufp_model.ObjVal

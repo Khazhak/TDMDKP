@@ -375,7 +375,7 @@ def problem_solver(filename, type, utility):
         os.remove(f'states_{type}//{filename}_{utility}.npz')
     except Exception as e:
         print(f"Error deleting file {filename}: {e}")
-    ufp_model.setParam('TimeLimit', 60)
+    ufp_model.setParam('TimeLimit', 200)
     ufp_model.setParam('MIPGap', 1e-3)
 
     ufp_model.setParam('IntFeasTol', 1e-6)
